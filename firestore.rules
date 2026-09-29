@@ -1,0 +1,61 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return signedIn() && userDoc().role == "admin";
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // Catálogo: lectura pública (la tienda muestra solo activo=true),
+    // escritura solo admin.
+    match /products/{id} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Usuarios: cada uno lee su propio doc; admin lee todos.
+    // Crear solo su propio doc con rol "user" (o "admin" si su email
+    // está autorizado — eso lo valida el cliente; el rol se eleva
+    // desde el panel por un admin existente).
+    match /users/{uid} {
+      allow read: if isSelf(uid) || isAdmin();
+      allow create: if isSelf(uid);
+      allow update: if isSelf(uid) || isAdmin();
+      allow delete: if false;
+    }
+
+    // Carritos: solo su dueño (leer/escribir) y admin (leer).
+    match /carts/{uid} {
+      allow read: if isSelf(uid) || isAdmin();
+      allow write: if isSelf(uid);
+    }
+
+    // Pedidos PayU: solo el servidor (Admin SDK) escribe. El cliente
+    // consulta su estado vía /api/orders (que verifica propiedad).
+    match /payu_orders/{id} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow create, update, delete: if false;
+    }
+
+    // Pedidos: el dueño crea y lee los suyos; admin lee todos y
+    // actualiza estado.
+    match /orders/{id} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+  }
+}

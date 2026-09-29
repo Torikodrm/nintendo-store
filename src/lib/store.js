@@ -31,7 +31,7 @@ export const PLATAFORMAS = [
  * {
  *   nombre: string (requerido),
  *   sku: string,
- *   precio: number (MXN),
+ *   precio: number (COP),
  *   stock: number (int),
  *   categoria: "Consolas" | "Juegos" | "Accesorios" | "Amiibo" | "Merch" | "Otro",
  *   plataforma: "Switch" | "Switch 2" | "Switch OLED" | "Multiplataforma" | "Otro",

@@ -16,13 +16,20 @@ import {
   ShieldCheck,
   Zap,
   ChevronRight,
-  Check,
+  LogOut,
+  User as UserIcon,
 } from "lucide-react";
 import {
   subscribeVisibleProducts,
   CATEGORIAS,
   PLATAFORMAS,
 } from "@/lib/store";
+import { subscribeAuth, signInWithGoogle, logOut } from "@/lib/auth";
+import {
+  loadUserCart,
+  saveUserCart,
+  clearUserCart,
+} from "@/lib/cart";
 import { formatPrice, cn } from "@/lib/utils";
 
 const CART_KEY = "nintendo-store-cart-v1";
@@ -49,21 +56,74 @@ export default function StoreHome() {
   const [sort, setSort] = useState("novedades");
   const [onlyStock, setOnlyStock] = useState(false);
 
-  const [cart, setCart] = useState({}); // id -> qty
+  // Invitado: carrito en localStorage (lazy init; loadCart() es seguro en SSR: devuelve {}).
+  const [cart, setCart] = useState(loadCart);
   const [cartOpen, setCartOpen] = useState(false);
   const [detail, setDetail] = useState(null);
-  const [ordered, setOrdered] = useState(false);
+  const [checkingOut, setCheckingOut] = useState(false);
+  const [payuError, setPayuError] = useState("");
 
-  // Cargar carrito persistido
+  const [session, setSession] = useState({ firebaseUser: null, profile: null, role: null, loading: true });
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [loginError, setLoginError] = useState("");
+  // UID cuya fusión remota ya terminó (solo se asigna en callbacks async,
+  // nunca sincrónico en el cuerpo del efecto).
+  const [syncedUid, setSyncedUid] = useState(null);
+  const uid = session.firebaseUser?.uid || null;
+  const cartSynced = !!uid && syncedUid === uid;
+
   useEffect(() => {
-    setCart(loadCart());
+    const unsub = subscribeAuth((s) => setSession(s));
+    return () => unsub && unsub();
   }, []);
 
-  useEffect(() => {
+  async function handleLogin() {
+    setLoginError("");
     try {
-      localStorage.setItem(CART_KEY, JSON.stringify(cart));
-    } catch {}
-  }, [cart]);
+      await signInWithGoogle();
+      setLoginOpen(false);
+    } catch (e) {
+      if (e?.code !== "auth/popup-closed-by-user") {
+        setLoginError(e.message || "No se pudo iniciar sesión");
+      }
+    }
+  }
+
+  // Al loguearte: fusiona carrito local + carrito guardado en Firestore
+  useEffect(() => {
+    if (!uid) return;
+    let alive = true;
+    loadUserCart(uid)
+      .then((remote) => {
+        if (!alive) return;
+        setCart((local) => {
+          const merged = { ...(remote || {}) };
+          for (const [k, v] of Object.entries(local || {})) {
+            merged[k] = Math.max(Number(merged[k]) || 0, Number(v) || 0);
+          }
+          return merged;
+        });
+        setSyncedUid(uid);
+      })
+      .catch(() => {
+        if (alive) setSyncedUid(uid);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [uid]);
+
+  // Persistencia: Firestore si hay sesión, localStorage si es invitado
+  useEffect(() => {
+    if (!uid) {
+      try {
+        localStorage.setItem(CART_KEY, JSON.stringify(cart));
+      } catch {}
+      return;
+    }
+    if (!cartSynced) return;
+    saveUserCart(uid, cart).catch(() => {});
+  }, [cart, uid, cartSynced]);
 
   // Suscripción a Firestore (misma BD que el admin: proyecto nintendo-66e56, colección products)
   // Query simple where(activo==true) sin orderBy para NO requerir índice compuesto.
@@ -156,10 +216,41 @@ export default function StoreHome() {
     });
   }
 
-  function checkout() {
-    setOrdered(true);
-    setCart({});
-    setTimeout(() => setOrdered(false), 5000);
+  // Checkout con Mercado Pago: orden interna en el servidor y redirect
+  // al checkout oficial (init_point / sandbox_init_point según entorno).
+  async function checkout() {
+    if (cartItems.length === 0 || checkingOut) return;
+    if (!uid || !session.firebaseUser) {
+      setCartOpen(false);
+      setLoginOpen(true);
+      return;
+    }
+    setCheckingOut(true);
+    setPayuError("");
+    try {
+      const idToken = await session.firebaseUser.getIdToken();
+      const items = {};
+      for (const i of cartItems) items[i.id] = i.qty;
+      const res = await fetch("/api/checkout/mercadopago", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items, idToken }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.redirectUrl) {
+        throw new Error(data.error || "No se pudo iniciar el pago");
+      }
+      setCart({});
+      await clearUserCart(uid).catch(() => {});
+      try {
+        localStorage.removeItem(CART_KEY);
+      } catch {}
+      window.location.href = data.redirectUrl;
+    } catch (e) {
+      setPayuError(e.message || "No se pudo iniciar el pago");
+    } finally {
+      setCheckingOut(false);
+    }
   }
 
   const destacados = useMemo(() => products.slice(0, 3), [products]);
@@ -201,6 +292,47 @@ export default function StoreHome() {
               </span>
             )}
           </button>
+          {session.loading ? (
+            <span className="flex h-11 w-11 items-center justify-center rounded-xl border border-red-800 bg-white/80">
+              <Loader2 className="h-5 w-5 animate-spin text-red-600" />
+            </span>
+          ) : session.firebaseUser ? (
+            <div className="flex h-11 items-center gap-2 rounded-xl border border-red-800 bg-gradient-to-b from-white to-slate-200 py-1 pl-1 pr-2 shadow-[0_2px_0_0_#7f1d1d]">
+              {session.profile?.photoURL || session.firebaseUser.photoURL ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={session.profile?.photoURL || session.firebaseUser.photoURL}
+                  alt={session.profile?.displayName || "Usuario"}
+                  className="h-8 w-8 rounded-lg border object-cover"
+                />
+              ) : (
+                <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-200">
+                  <UserIcon className="h-4 w-4 text-slate-500" />
+                </span>
+              )}
+              <span className="hidden max-w-24 truncate text-xs font-black text-slate-700 lg:inline">
+                {(session.profile?.displayName || session.firebaseUser.displayName || "").split(" ")[0]}
+                {session.role === "admin" && (
+                  <span className="ml-1 rounded bg-red-600 px-1 py-0.5 text-[9px] uppercase text-white">admin</span>
+                )}
+              </span>
+              <button
+                onClick={() => logOut()}
+                title="Cerrar sesión"
+                className="cursor-pointer rounded-lg p-1.5 text-red-700 hover:bg-red-50"
+              >
+                <LogOut className="h-4 w-4" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setLoginOpen(true)}
+              className="flex h-11 cursor-pointer items-center gap-2 rounded-xl border border-white/60 bg-slate-900 px-4 font-black text-white shadow-[0_2px_0_0_#7f1d1d] transition active:translate-y-[2px] active:shadow-none"
+            >
+              <UserIcon className="h-5 w-5" />
+              <span className="hidden sm:inline">Entrar</span>
+            </button>
+          )}
         </div>
         <div className="mx-auto max-w-6xl px-4 pb-3 md:hidden">
           <div className="relative">
@@ -221,12 +353,12 @@ export default function StoreHome() {
             {fbError}
           </div>
         )}
-        {ordered && (
-          <div className="flex items-center gap-3 rounded-2xl border-2 border-emerald-500 bg-gradient-to-b from-emerald-50 to-emerald-100 p-4 text-sm font-bold text-emerald-900 shadow-[0_3px_0_0_#047857]">
-            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-500 text-white">
-              <Check className="h-5 w-5" />
+        {payuError && (
+          <div className="flex items-center gap-3 rounded-2xl border-2 border-red-500 bg-gradient-to-b from-red-50 to-red-100 p-4 text-sm font-bold text-red-900 shadow-[0_3px_0_0_#b91c1c]">
+            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-red-500 text-white">
+              <X className="h-5 w-5" />
             </span>
-            ¡Pedido confirmado! Gracias por comprar en Nintendo Store. Te contactaremos por correo.
+            No se pudo iniciar el pago con Mercado Pago: {payuError}
           </div>
         )}
 
@@ -667,18 +799,68 @@ export default function StoreHome() {
                 <span>Total</span>
                 <span>{formatPrice(cartTotal)}</span>
               </div>
+              {!uid && cartItems.length > 0 && (
+                <p className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">
+                  Inicia sesión con Google para finalizar tu compra y guardar tu carrito en tu cuenta.
+                </p>
+              )}
               <button
-                disabled={cartItems.length === 0}
+                disabled={cartItems.length === 0 || checkingOut}
                 onClick={checkout}
                 className="flex h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-red-800 bg-gradient-to-b from-red-500 to-red-600 font-black text-white shadow-[0_3px_0_0_#7f1d1d] active:translate-y-[3px] active:shadow-none disabled:from-slate-200 disabled:to-slate-300 disabled:text-slate-400 disabled:shadow-none"
               >
-                Finalizar compra · {formatPrice(cartTotal)}
+                {checkingOut ? (
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                ) : null}
+                {checkingOut
+                  ? "Conectando con Mercado Pago…"
+                  : uid
+                    ? `Pagar con Mercado Pago · ${formatPrice(cartTotal)}`
+                    : "Entrar para comprar"}
               </button>
               <p className="text-center text-[11px] font-semibold text-slate-400">
-                Demo: no se descuenta stock automáticamente. El admin lo gestiona.
+                Pago seguro con Mercado Pago (modo pruebas, sin cargos reales).
               </p>
             </div>
           </aside>
+        </div>
+      )}
+
+      {/* Modal login */}
+      {loginOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4"
+          onClick={() => setLoginOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm rounded-3xl border-2 border-slate-900 bg-white p-6 text-center shadow-2xl"
+          >
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl border border-red-800 bg-gradient-to-b from-red-500 to-red-600">
+              <Gamepad2 className="h-7 w-7 text-white" />
+            </div>
+            <h3 className="text-lg font-black text-slate-900">Entra a Nintendo Store</h3>
+            <p className="mt-1 text-sm text-slate-500">
+              Con Google guardamos tu carrito y el historial de tus pedidos.
+            </p>
+            {loginError && (
+              <p className="mt-3 rounded-xl border border-red-300 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700">
+                {loginError}
+              </p>
+            )}
+            <button
+              onClick={handleLogin}
+              className="mt-4 flex h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white font-black text-slate-700 shadow-[0_3px_0_0_#cbd5e1] hover:bg-slate-50 active:translate-y-[3px] active:shadow-none"
+            >
+              <UserIcon className="h-5 w-5 text-red-600" /> Continuar con Google
+            </button>
+            <button
+              onClick={() => setLoginOpen(false)}
+              className="mt-2 h-10 w-full cursor-pointer rounded-xl font-bold text-slate-400 hover:text-slate-600"
+            >
+              Seguir como invitado
+            </button>
+          </div>
         </div>
       )}
     </div>

@@ -1,5 +1,12 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
 
+## Nintendo Store — pagos
+
+- Pasarela activa: **Mercado Pago Checkout Pro** (COP, Colombia). Docs: [`docs/mercadopago.md`](docs/mercadopago.md).
+- Código PayU (Europa/LATAM) conservado pero inactivo en el checkout. Docs histórica LATAM: [`docs/payu-latam-production.md`](docs/payu-latam-production.md).
+- Configuración: copia `.env.example` a `.env.local` (nunca commitees secretos).
+- Tests: `yarn test` (sin red). Lint: `yarn lint`. Build: `yarn build`.
+
 ## Getting Started
 
 First, run the development server:

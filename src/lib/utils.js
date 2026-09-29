@@ -6,9 +6,9 @@ export function cn(...inputs) {
 
 export function formatPrice(value) {
   const n = Number(value) || 0;
-  return n.toLocaleString("es-MX", {
+  return n.toLocaleString("es-CO", {
     style: "currency",
-    currency: "MXN",
+    currency: "COP",
     minimumFractionDigits: 2,
   });
 }
